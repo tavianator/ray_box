@@ -23,6 +23,8 @@ ALL := ray_box_baseline ray_box_exclusive ray_box_inclusive
 CC := clang
 CFLAGS := -Wall -O3 -flto -march=native
 
+SIMD ?= 0
+
 all: $(ALL)
 .PHONY: all
 
@@ -30,7 +32,7 @@ $(ALL): ray_box_%: black_box.o ray_box_%.o
 	+$(CC) $(CFLAGS) $^ -o $@
 
 $(ALL:%=%.o): ray_box_%.o: ray_box.c
-	$(CC) $(CFLAGS) -D$(shell impl=$*; echo $${impl^^}) -c $< -o $@
+	$(CC) $(CFLAGS) -D$(shell impl=$*; echo $${impl^^}) -DSIMD=$(SIMD) -c $< -o $@
 
 black_box.o: black_box.c
 	$(CC) -c $< -o $@
