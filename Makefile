@@ -23,8 +23,6 @@ ALL := ray_box_baseline ray_box_exclusive ray_box_inclusive
 CC := clang
 CFLAGS := -Wall -O3 -flto -march=native
 
-COUNT := 10000000000
-
 all: $(ALL)
 .PHONY: all
 
@@ -37,39 +35,9 @@ $(ALL:%=%.o): ray_box_%.o: ray_box.c
 black_box.o: black_box.c
 	$(CC) -c $< -o $@
 
-bench: const_hz $(ALL:%=bench_%) unconst_hz
+bench: all
+	./bench.sh
 .PHONY: bench
-
-# Don't run the benchmarks in parallel
-.NOTPARALLEL:
-
-$(ALL:%=bench_%): bench_%: %
-	@printf '%9s (height %2d): ' $(<:ray_box_%=%) 4
-	@./$< 4 $(COUNT)
-	@printf '%9s (height %2d): ' $(<:ray_box_%=%) 5
-	@./$< 5 $(COUNT)
-	@printf '%9s (height %2d): ' $(<:ray_box_%=%) 8
-	@./$< 8 $(COUNT)
-	@printf '%9s (height %2d): ' $(<:ray_box_%=%) 10
-	@./$< 10 $(COUNT)
-	@printf '---\n'
-.PHONY: $(ALL:%=bench_%)
-
-const_hz:
-ifdef CONST_HZ
-	sudo cpupower frequency-set -g performance >/dev/null
-	echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost >/dev/null
-endif
-	@:
-.PHONY: const_hz
-
-unconst_hz:
-ifdef CONST_HZ
-	sudo cpupower frequency-set -g schedutil >/dev/null
-	echo 1 | sudo tee /sys/devices/system/cpu/cpufreq/boost >/dev/null
-endif
-	@:
-.PHONY: unconst_hz
 
 clean:
 	$(RM) *.o

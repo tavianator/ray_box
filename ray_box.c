@@ -21,10 +21,14 @@
  */
 
 #include "black_box.h"
+#include <errno.h>
 #include <float.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdnoreturn.h>
+#include <string.h>
 #include <time.h>
 #include <xmmintrin.h>
 
@@ -120,14 +124,48 @@ struct box *octree(const struct box *parent, struct box *children, int level) {
     return child;
 }
 
+struct args {
+    size_t niters;
+    const struct ray *ray;
+    size_t nboxes;
+    const struct box *boxes;
+    float *ts;
+};
+
+static void *work(void *ptr) {
+    struct args *args = ptr;
+
+    for (int i = 0; i < args->niters; ++i) {
+        intersections(args->ray, args->nboxes, args->boxes, args->ts);
+        black_box(args->ts);
+    }
+
+    return NULL;
+}
+
+static noreturn void die(const char *str, int error) {
+    errno = error;
+    perror(str);
+    abort();
+}
+
+static void *xmalloc(size_t size) {
+    void *ptr = malloc(size);
+    if (!ptr) {
+        die("malloc()", errno);
+    }
+    return ptr;
+}
+
 int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <LEVELS> <COUNT>\n", argv[0]);
+    if (argc != 4) {
+        fprintf(stderr, "Usage: %s <COUNT> <LEVELS> <THREADS>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
-    size_t levels = strtoull(argv[1], NULL, 0);
-    size_t count = strtoull(argv[2], NULL, 0);
+    size_t count = strtoull(argv[1], NULL, 0);
+    size_t levels = strtoull(argv[2], NULL, 0);
+    size_t nthreads = strtoull(argv[3], NULL, 0);
     size_t nboxes = (1ULL << (3 * levels)) / 7;
     size_t niters = count / nboxes;
     niters = niters > 0 ? niters : 1;
@@ -138,12 +176,7 @@ int main(int argc, char *argv[]) {
     };
     black_box(&ray);
 
-    struct box *boxes = malloc(nboxes * sizeof(*boxes));
-    if (!boxes) {
-        perror("malloc()");
-        return EXIT_FAILURE;
-    }
-
+    struct box *boxes = xmalloc(nboxes * sizeof(*boxes));
     boxes[0] = (struct box) {
         .min = {-1.0, -1.0, -1.0},
         .max = {+1.0, +1.0, +1.0},
@@ -151,11 +184,8 @@ int main(int argc, char *argv[]) {
     octree(boxes, boxes + 1, levels - 1);
     black_box(boxes);
 
-    float *ts = malloc(nboxes * sizeof(*ts));
-    if (!ts) {
-        perror("malloc()");
-        return EXIT_FAILURE;
-    }
+    size_t tsize = nboxes * sizeof(float);
+    float *ts = xmalloc(tsize);
 
     for (size_t i = 0; i < nboxes; ++i) {
         ts[i] = INFINITY;
@@ -165,29 +195,48 @@ int main(int argc, char *argv[]) {
     intersections(&ray, nboxes, boxes, ts);
     black_box(ts);
 
-    struct timespec start;
-    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
-        perror("clock_gettime()");
-        return EXIT_FAILURE;
+    struct args *args = xmalloc(nthreads * sizeof(*args));
+    for (size_t i = 0; i < nthreads; ++i) {
+        float *copy = xmalloc(tsize);
+        memcpy(copy, ts, tsize);
+
+        args[i] = (struct args) {
+            .niters = niters,
+            .ray = &ray,
+            .nboxes = nboxes,
+            .boxes = boxes,
+            .ts = copy,
+        };
     }
 
-    for (int i = 0; i < niters; ++i) {
-        intersections(&ray, nboxes, boxes, ts);
-        black_box(ts);
+    struct timespec start;
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
+        die("clock_gettime()", errno);
+    }
+
+    pthread_t *threads = xmalloc(nthreads * sizeof(*threads));
+    for (size_t i = 0; i < nthreads; ++i) {
+        int ret = pthread_create(&threads[i], NULL, work, &args[i]);
+        if (ret != 0) {
+            die("pthread_create()", ret);
+        }
+    }
+
+    for (size_t i = 0; i < nthreads; ++i) {
+        int ret = pthread_join(threads[i], NULL);
+        if (ret != 0) {
+            die("pthread_join()", ret);
+        }
     }
 
     struct timespec end;
     if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) {
-        perror("clock_gettime()");
-        return EXIT_FAILURE;
+        die("clock_gettime()", errno);
     }
 
     double elapsed = end.tv_sec - start.tv_sec;
     elapsed += 1.0e-9 * (end.tv_nsec - start.tv_nsec);
+    printf("%f", nthreads * niters * nboxes / elapsed / 1.0e6);
 
-    printf("%f Mboxes/s (%zu boxes in %f s)\n", niters * nboxes / elapsed / 1.0e6, niters * nboxes, elapsed);
-
-    free(ts);
-    free(boxes);
     return EXIT_SUCCESS;
 }
