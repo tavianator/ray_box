@@ -97,18 +97,25 @@ struct box {
 };
 
 #if SIMD
+struct vray {
+    vfloat origin[3];
+    vfloat dir_inv[3];
+};
+
 struct vbox {
     vfloat min[3];
     vfloat max[3];
 };
 
+typedef struct vray vray;
 typedef struct vbox vbox;
 #else
+typedef struct ray vray;
 typedef struct box vbox;
 #endif
 
-void intersections(
-    const struct ray *ray,
+static void intersections(
+    const vray *ray,
     size_t nboxes,
     const vbox boxes[nboxes],
     vfloat ts[nboxes])
@@ -119,11 +126,8 @@ void intersections(
         vfloat tmax = ts[i];
 
         for (int j = 0; j < 3; ++j) {
-            vfloat origin = broadcast(ray->origin[j]);
-            vfloat dir_inv = broadcast(ray->dir_inv[j]);
-
-            vfloat t1 = (box->min[j] - origin) * dir_inv;
-            vfloat t2 = (box->max[j] - origin) * dir_inv;
+            vfloat t1 = (box->min[j] - ray->origin[j]) * ray->dir_inv[j];
+            vfloat t2 = (box->max[j] - ray->origin[j]) * ray->dir_inv[j];
 
 #if BASELINE
             tmin = max(tmin, min(t1, t2));
@@ -163,22 +167,18 @@ struct box *octree(const struct box *parent, struct box *children, int level) {
     struct box *child = children;
 
     if (level > 0) {
-        float dx = (parent->max[0] - parent->min[0]) / 2.0;
-        float dy = (parent->max[1] - parent->min[1]) / 2.0;
-        float dz = (parent->max[2] - parent->min[2]) / 2.0;
-
-        for (int x = 0; x < 2; ++x) {
-            for (int y = 0; y < 2; ++y) {
-                for (int z = 0; z < 2; ++z) {
-                    child->min[0] = parent->min[0] + x * dx;
-                    child->min[1] = parent->min[1] + y * dy;
-                    child->min[2] = parent->min[2] + z * dz;
-                    child->max[0] = child->min[0] + dx;
-                    child->max[1] = child->min[1] + dy;
-                    child->max[2] = child->min[2] + dz;
-                    ++child;
+        for (int i = 0; i < 8; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                float mid = (parent->max[j] + parent->min[j]) / 2.0;
+                if ((i >> j) & 1) {
+                    child->min[j] = mid;
+                    child->max[j] = parent->max[j];
+                } else {
+                    child->min[j] = parent->min[j];
+                    child->max[j] = mid;
                 }
             }
+            ++child;
         }
 
         for (int i = 0; i < 8; ++i) {
@@ -189,33 +189,43 @@ struct box *octree(const struct box *parent, struct box *children, int level) {
     return child;
 }
 
-#if SIMD
-struct vbox *pack_boxes(size_t nboxes, const struct box boxes[nboxes]) {
-    size_t npacked = nboxes / 8;
-    struct vbox *packed = aligned_alloc(alignof(struct vbox), npacked * sizeof(*packed));
-    if (!packed) {
-        die("aligned_alloc()", errno);
+static void broadcast_ray(vray *vray, const struct ray *ray) {
+    for (int i = 0; i < 3; ++i) {
+        vray->origin[i] = broadcast(ray->origin[i]);
+        vray->dir_inv[i] = broadcast(ray->dir_inv[i]);
     }
+}
 
-    for (size_t i = 0; i < npacked; ++i) {
+#if SIMD
+static vbox *pack_boxes(size_t *nboxes, size_t *nvboxes, struct box boxes[*nboxes]) {
+    *nvboxes = *nboxes / 8;
+    *nboxes = *nvboxes * 8;
+    vbox *vboxes = MALLOC(vbox, *nvboxes);
+
+    for (size_t i = 0; i < *nvboxes; ++i) {
         const struct box *unpacked = &boxes[8 * i];
         for (int j = 0; j < 3; ++j) {
             for (int k = 0; k < 8; ++k) {
-                packed[i].min[j][k] = unpacked[k].min[j];
-                packed[i].max[j][k] = unpacked[k].max[j];
+                vboxes[i].min[j][k] = unpacked[k].min[j];
+                vboxes[i].max[j][k] = unpacked[k].max[j];
             }
         }
     }
 
-    return packed;
+    return vboxes;
+}
+#else
+static vbox *pack_boxes(size_t *nboxes, size_t *nvboxes, struct box boxes[*nboxes]) {
+    *nvboxes = *nboxes;
+    return boxes;
 }
 #endif
 
 struct args {
     size_t niters;
-    const struct ray *ray;
+    const vray *ray;
     size_t nboxes;
-    vbox *boxes;
+    const vbox *boxes;
     vfloat *ts;
 };
 
@@ -239,8 +249,8 @@ int main(int argc, char *argv[]) {
     size_t count = strtoull(argv[1], NULL, 0);
     size_t levels = strtoull(argv[2], NULL, 0);
     size_t nthreads = strtoull(argv[3], NULL, 0);
-    size_t nunpacked = (1ULL << (3 * levels)) / 7;
-    size_t niters = count / nunpacked;
+    size_t nboxes = (1ULL << (3 * levels)) / 7;
+    size_t niters = count / nboxes;
     niters = niters > 0 ? niters : 1;
 
     struct ray ray = {
@@ -249,43 +259,40 @@ int main(int argc, char *argv[]) {
     };
     black_box(&ray);
 
-    struct box *unpacked = MALLOC(struct box, nunpacked);
-    unpacked[0] = (struct box) {
+    vray vray;
+    broadcast_ray(&vray, &ray);
+
+    struct box *boxes = MALLOC(struct box, nboxes);
+    boxes[0] = (struct box) {
         .min = {-1.0, -1.0, -1.0},
         .max = {+1.0, +1.0, +1.0},
     };
-    octree(unpacked, unpacked + 1, levels - 1);
-    black_box(unpacked);
+    octree(boxes, boxes + 1, levels - 1);
+    black_box(boxes);
 
-#if SIMD
-    vbox *boxes = pack_boxes(nunpacked, unpacked);
-    size_t nboxes = nunpacked / 8;
-    nunpacked = nboxes * 8;
-#else
-    vbox *boxes = unpacked;
-    size_t nboxes = nunpacked;
-#endif
+    size_t nvboxes;
+    vbox *vboxes = pack_boxes(&nboxes, &nvboxes, boxes);
 
-    vfloat *ts = MALLOC(vfloat, nboxes);
+    vfloat *ts = MALLOC(vfloat, nvboxes);
 
-    for (size_t i = 0; i < nboxes; ++i) {
+    for (size_t i = 0; i < nvboxes; ++i) {
         ts[i] = broadcast(INFINITY);
     }
     black_box(ts);
 
-    intersections(&ray, nboxes, boxes, ts);
+    intersections(&vray, nvboxes, vboxes, ts);
     black_box(ts);
 
     struct args *args = MALLOC(struct args, nthreads);
     for (size_t i = 0; i < nthreads; ++i) {
-        vfloat *copy = MALLOC(vfloat, nboxes);
-        memcpy(copy, ts, nboxes * sizeof(vfloat));
+        vfloat *copy = MALLOC(vfloat, nvboxes);
+        memcpy(copy, ts, nvboxes * sizeof(vfloat));
 
         args[i] = (struct args) {
             .niters = niters,
-            .ray = &ray,
-            .nboxes = nboxes,
-            .boxes = boxes,
+            .ray = &vray,
+            .nboxes = nvboxes,
+            .boxes = vboxes,
             .ts = copy,
         };
     }
@@ -318,7 +325,7 @@ int main(int argc, char *argv[]) {
     double elapsed = end.tv_sec - start.tv_sec;
     elapsed += 1.0e-9 * (end.tv_nsec - start.tv_nsec);
 
-    printf("%f", nthreads * niters * nunpacked / elapsed / 1.0e9);
+    printf("%f", nthreads * niters * nboxes / elapsed / 1.0e9);
 
     return EXIT_SUCCESS;
 }
