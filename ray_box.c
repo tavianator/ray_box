@@ -98,6 +98,28 @@ static inline vfloat newt(vfloat tmin, vfloat tmax, vfloat t) {
 #endif
 }
 
+#elif __ARM_NEON
+
+#include <arm_neon.h>
+
+typedef float32x4_t vfloat;
+
+static inline vfloat broadcast(float x) {
+    return vdupq_n_f32(x);
+}
+
+static inline vfloat min(vfloat x, vfloat y) {
+    return vbslq_f32(vcltq_f32(x, y), x, y);
+}
+
+static inline vfloat max(vfloat x, vfloat y) {
+    return vbslq_f32(vcgtq_f32(x, y), x, y);
+}
+
+static inline vfloat newt(vfloat tmin, vfloat tmax, vfloat t) {
+    return vbslq_f32(vcltq_f32(tmin, tmax), tmin, t);
+}
+
 #else
 #error "Which vector instruction set?"
 #endif
