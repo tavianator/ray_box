@@ -229,7 +229,7 @@ static void *xmemalign(size_t align, size_t size) {
 
 #define MALLOC(type, count) xmemalign(alignof(type), count * sizeof(type))
 
-struct box *octree(const struct box *parent, struct box *children, int level) {
+static struct box *octree(const struct box *parent, struct box *children, int level) {
     struct box *child = children;
 
     if (level > 0) {
