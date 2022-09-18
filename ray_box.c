@@ -33,6 +33,9 @@
 #include <time.h>
 
 #if SIMD
+
+#if __AVX2__
+
 #include <xmmintrin.h>
 #include <immintrin.h>
 
@@ -59,6 +62,47 @@ static inline vfloat newt(vfloat tmin, vfloat tmax, vfloat t) {
         vfloat mask = _mm256_cmp_ps(tmin, tmax, CMP);
         return _mm256_blendv_ps(t, tmin, mask);
 }
+
+#elif __SSE__
+
+#include <xmmintrin.h>
+#include <smmintrin.h>
+
+typedef __m128 vfloat;
+
+static inline vfloat broadcast(float x) {
+    return _mm_set1_ps(x);
+}
+
+static inline vfloat min(vfloat x, vfloat y) {
+    return _mm_min_ps(x, y);
+}
+
+static inline vfloat max(vfloat x, vfloat y) {
+    return _mm_max_ps(x, y);
+}
+
+static inline vfloat newt(vfloat tmin, vfloat tmax, vfloat t) {
+#if INCLUSIVE
+        vfloat mask = _mm_cmple_ps(tmin, tmax);
+#else
+        vfloat mask = _mm_cmplt_ps(tmin, tmax);
+#endif
+
+#if __SSE4_1__
+        return _mm_blendv_ps(t, tmin, mask);
+#else
+        tmin = _mm_and_ps(mask, tmin);
+        t = _mm_andnot_ps(mask, t);
+        return _mm_or_ps(tmin, t);
+#endif
+}
+
+#else
+#error "Which vector instruction set?"
+#endif
+
+#define VSIZE (sizeof(vfloat) / sizeof(float))
 
 #else // !SIMD
 
@@ -198,14 +242,14 @@ static void broadcast_ray(vray *vray, const struct ray *ray) {
 
 #if SIMD
 static vbox *pack_boxes(size_t *nboxes, size_t *nvboxes, struct box boxes[*nboxes]) {
-    *nvboxes = *nboxes / 8;
-    *nboxes = *nvboxes * 8;
+    *nvboxes = *nboxes / VSIZE;
+    *nboxes = *nvboxes * VSIZE;
     vbox *vboxes = MALLOC(vbox, *nvboxes);
 
     for (size_t i = 0; i < *nvboxes; ++i) {
-        const struct box *unpacked = &boxes[8 * i];
+        const struct box *unpacked = &boxes[VSIZE * i];
         for (int j = 0; j < 3; ++j) {
-            for (int k = 0; k < 8; ++k) {
+            for (int k = 0; k < VSIZE; ++k) {
                 vboxes[i].min[j][k] = unpacked[k].min[j];
                 vboxes[i].max[j][k] = unpacked[k].max[j];
             }
