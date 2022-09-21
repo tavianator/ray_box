@@ -164,37 +164,37 @@ struct box {
 };
 
 #if SIMD
-struct vray {
-    vfloat origin[3];
-    vfloat dir_inv[3];
-};
-
 struct vbox {
     vfloat min[3];
     vfloat max[3];
 };
 
-typedef struct vray vray;
 typedef struct vbox vbox;
 #else
-typedef struct ray vray;
 typedef struct box vbox;
 #endif
 
 static void intersections(
-    const vray *ray,
+    const struct ray *ray,
     size_t nboxes,
     const vbox boxes[nboxes],
     vfloat ts[nboxes])
 {
+    vfloat origin[3];
+    vfloat dir_inv[3];
+    for (int i = 0; i < 3; ++i) {
+        origin[i] = broadcast(ray->origin[i]);
+        dir_inv[i] = broadcast(ray->dir_inv[i]);
+    }
+
     for (size_t i = 0; i < nboxes; ++i) {
         const vbox *box = &boxes[i];
         vfloat tmin = broadcast(0.0);
         vfloat tmax = ts[i];
 
         for (int j = 0; j < 3; ++j) {
-            vfloat t1 = (box->min[j] - ray->origin[j]) * ray->dir_inv[j];
-            vfloat t2 = (box->max[j] - ray->origin[j]) * ray->dir_inv[j];
+            vfloat t1 = (box->min[j] - origin[j]) * dir_inv[j];
+            vfloat t2 = (box->max[j] - origin[j]) * dir_inv[j];
 
 #if BASELINE
             tmin = max(tmin, min(t1, t2));
@@ -254,13 +254,6 @@ static struct box *octree(const struct box *parent, struct box *children, int le
     }
 
     return child;
-}
-
-static void broadcast_ray(vray *vray, const struct ray *ray) {
-    for (int i = 0; i < 3; ++i) {
-        vray->origin[i] = broadcast(ray->origin[i]);
-        vray->dir_inv[i] = broadcast(ray->dir_inv[i]);
-    }
 }
 
 #if SIMD
@@ -354,9 +347,6 @@ static void check_ray(const struct ray *ray) {
     }
     reference_impl(ray, nboxes, boxes, ts);
 
-    vray vray;
-    broadcast_ray(&vray, ray);
-
     size_t nvboxes;
     vbox *vboxes = pack_boxes(nboxes, &nvboxes, boxes);
 
@@ -364,7 +354,7 @@ static void check_ray(const struct ray *ray) {
     for (size_t i = 0; i < nvboxes; ++i) {
         vts[i] = broadcast(INFINITY);
     }
-    intersections(&vray, nvboxes, vboxes, vts);
+    intersections(ray, nvboxes, vboxes, vts);
 
     for (size_t i = 0; i < nboxes; ++i) {
 #if BASELINE
@@ -438,7 +428,7 @@ static void check() {
 
 struct args {
     size_t niters;
-    const vray *ray;
+    const struct ray *ray;
     size_t nboxes;
     const vbox *boxes;
     vfloat *ts;
@@ -477,9 +467,6 @@ int main(int argc, char *argv[]) {
     };
     black_box(&ray);
 
-    vray vray;
-    broadcast_ray(&vray, &ray);
-
     struct box *boxes = MALLOC(struct box, nboxes);
     boxes[0] = (struct box) {
         .min = {-1.0, -1.0, -1.0},
@@ -498,7 +485,7 @@ int main(int argc, char *argv[]) {
     }
     black_box(ts);
 
-    intersections(&vray, nvboxes, vboxes, ts);
+    intersections(&ray, nvboxes, vboxes, ts);
     black_box(ts);
 
     struct args *args = MALLOC(struct args, nthreads);
@@ -508,7 +495,7 @@ int main(int argc, char *argv[]) {
 
         args[i] = (struct args) {
             .niters = niters,
-            .ray = &vray,
+            .ray = &ray,
             .nboxes = nvboxes,
             .boxes = vboxes,
             .ts = copy,
