@@ -3,7 +3,7 @@
 set -eu
 
 COUNT=$((10 ** 10))
-IMPLS=(baseline {in,ex}clusive)
+IMPLS=({in,ex}clusive)
 THREADS=(1 2 4 6 8 12 16 24 32 48)
 LEVELS=({4..10})
 

@@ -18,7 +18,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-ALL := ray_box_baseline ray_box_exclusive ray_box_inclusive
+ALL := ray_box_exclusive ray_box_inclusive
 
 SIMD ?= 0
 

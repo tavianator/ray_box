@@ -199,10 +199,7 @@ static void intersections(
             vfloat jmin = (bmin - origin[j]) * dir_inv[j];
             vfloat jmax = (bmax - origin[j]) * dir_inv[j];
 
-#if BASELINE
-            tmin = max(tmin, jmin);
-            tmax = min(tmax, jmax);
-#elif EXCLUSIVE
+#if EXCLUSIVE
             tmin = max(tmin, min(jmin, tmax));
             tmax = min(tmax, max(jmax, tmin));
 #elif INCLUSIVE
@@ -360,21 +357,6 @@ static void check_ray(const struct ray *ray) {
     intersections(ray, nvboxes, vboxes, vts);
 
     for (size_t i = 0; i < nboxes; ++i) {
-#if BASELINE
-        bool skip = false;
-        for (int j = 0; j < 3; ++j) {
-            float t1 = (boxes[i].corners[j][0] - ray->origin[j]) * ray->dir_inv[j];
-            float t2 = (boxes[i].corners[j][1] - ray->origin[j]) * ray->dir_inv[j];
-            if (isnan(t1) || isnan(t2)) {
-                skip = true;
-                break;
-            }
-        }
-        if (skip) {
-            continue;
-        }
-#endif
-
         float t = ts[i];
 #if SIMD
         float vt = vts[i / VSIZE][i % VSIZE];
