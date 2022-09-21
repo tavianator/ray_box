@@ -20,10 +20,10 @@
 
 ALL := ray_box_baseline ray_box_exclusive ray_box_inclusive
 
-CC := clang
-CFLAGS := -Wall -g -O3 -flto -march=native
-
 SIMD ?= 0
+
+CC := clang
+CFLAGS := -Wall -g -O3 -flto -march=native -DSIMD=$(SIMD)
 
 all: $(ALL)
 .PHONY: all
@@ -31,11 +31,20 @@ all: $(ALL)
 $(ALL): ray_box_%: black_box.o ray_box_%.o
 	+$(CC) $(CFLAGS) $^ -o $@
 
-$(ALL:%=%.o): ray_box_%.o: ray_box.c
-	$(CC) $(CFLAGS) -D$(shell impl=$*; echo $${impl^^}) -DSIMD=$(SIMD) -c $< -o $@
+$(ALL:%=%.o): ray_box_%.o: ray_box.c .flags
+	$(CC) $(CFLAGS) -D$(shell impl=$*; echo $${impl^^}) -c $< -o $@
 
-black_box.o: black_box.c
+black_box.o: black_box.c .flags
 	$(CC) -c $< -o $@
+
+# Save the compiler flags to rebuild everything when they change
+.newflags:
+	@echo $(CC) $(CFLAGS) >$@
+.PHONY: .newflags
+
+# Only update .flags if .newflags is different
+.flags: .newflags
+	@test -e $@ && cmp -s $@ $< && rm $< || mv $< $@
 
 check: $(ALL:%=check_%)
 .PHONY: check
