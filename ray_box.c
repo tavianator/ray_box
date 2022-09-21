@@ -159,14 +159,12 @@ struct ray {
 };
 
 struct box {
-    float min[3];
-    float max[3];
+    float corners[3][2];
 };
 
 #if SIMD
 struct vbox {
-    vfloat min[3];
-    vfloat max[3];
+    vfloat corners[3][2];
 };
 
 typedef struct vbox vbox;
@@ -182,9 +180,11 @@ static void intersections(
 {
     vfloat origin[3];
     vfloat dir_inv[3];
+    size_t sign[3];
     for (int i = 0; i < 3; ++i) {
         origin[i] = broadcast(ray->origin[i]);
         dir_inv[i] = broadcast(ray->dir_inv[i]);
+        sign[i] = ray->dir_inv[i] < 0.0;
     }
 
     for (size_t i = 0; i < nboxes; ++i) {
@@ -193,18 +193,21 @@ static void intersections(
         vfloat tmax = ts[i];
 
         for (int j = 0; j < 3; ++j) {
-            vfloat t1 = (box->min[j] - origin[j]) * dir_inv[j];
-            vfloat t2 = (box->max[j] - origin[j]) * dir_inv[j];
+            vfloat bmin = box->corners[j][sign[j]];
+            vfloat bmax = box->corners[j][1 ^ sign[j]];
+
+            vfloat jmin = (bmin - origin[j]) * dir_inv[j];
+            vfloat jmax = (bmax - origin[j]) * dir_inv[j];
 
 #if BASELINE
-            tmin = max(tmin, min(t1, t2));
-            tmax = min(tmax, max(t1, t2));
+            tmin = max(tmin, jmin);
+            tmax = min(tmax, jmax);
 #elif EXCLUSIVE
-            tmin = max(tmin, min(min(t1, t2), tmax));
-            tmax = min(tmax, max(max(t1, t2), tmin));
+            tmin = max(tmin, min(jmin, tmax));
+            tmax = min(tmax, max(jmax, tmin));
 #elif INCLUSIVE
-            tmin = min(max(t1, tmin), max(t2, tmin));
-            tmax = max(min(t1, tmax), min(t2, tmax));
+            tmin = max(jmin, tmin);
+            tmax = min(jmax, tmax);
 #else
 #error "Which implementation?"
 #endif
@@ -236,13 +239,13 @@ static struct box *octree(const struct box *parent, struct box *children, int le
     if (level > 0) {
         for (int i = 0; i < 8; ++i) {
             for (int j = 0; j < 3; ++j) {
-                float mid = (parent->max[j] + parent->min[j]) / 2.0;
+                float mid = (parent->corners[j][1] + parent->corners[j][0]) / 2.0;
                 if ((i >> j) & 1) {
-                    child->min[j] = mid;
-                    child->max[j] = parent->max[j];
+                    child->corners[j][0] = mid;
+                    child->corners[j][1] = parent->corners[j][1];
                 } else {
-                    child->min[j] = parent->min[j];
-                    child->max[j] = mid;
+                    child->corners[j][0] = parent->corners[j][0];
+                    child->corners[j][1] = mid;
                 }
             }
             ++child;
@@ -267,8 +270,8 @@ static vbox *pack_boxes(size_t nboxes, size_t *nvboxes, struct box boxes[nboxes]
                 --k;
             }
             for (size_t d = 0; d < 3; ++d) {
-                vboxes[i].min[d][j] = boxes[k].min[d];
-                vboxes[i].max[d][j] = boxes[k].max[d];
+                vboxes[i].corners[d][0][j] = boxes[k].corners[d][0];
+                vboxes[i].corners[d][1][j] = boxes[k].corners[d][1];
             }
         }
     }
@@ -295,8 +298,8 @@ static void reference_impl(
 
         for (int j = 0; j < 3; ++j) {
             if (isfinite(ray->dir_inv[j])) {
-                float t1 = (box->min[j] - ray->origin[j]) * ray->dir_inv[j];
-                float t2 = (box->max[j] - ray->origin[j]) * ray->dir_inv[j];
+                float t1 = (box->corners[j][0] - ray->origin[j]) * ray->dir_inv[j];
+                float t2 = (box->corners[j][1] - ray->origin[j]) * ray->dir_inv[j];
 
                 if (t1 < t2) {
                     tmin = tmin > t1 ? tmin : t1;
@@ -306,9 +309,9 @@ static void reference_impl(
                     tmax = tmax < t1 ? tmax : t1;
                 }
 #if INCLUSIVE
-            } else if (ray->origin[j] < box->min[j] || ray->origin[j] > box->max[j]) {
+            } else if (ray->origin[j] < box->corners[j][0] || ray->origin[j] > box->corners[j][1]) {
 #else
-            } else if (ray->origin[j] <= box->min[j] || ray->origin[j] >= box->max[j]) {
+            } else if (ray->origin[j] <= box->corners[j][0] || ray->origin[j] >= box->corners[j][1]) {
 #endif
                 tmin = INFINITY;
                 break;
@@ -333,10 +336,10 @@ static void check_ray(const struct ray *ray) {
         int n = i;
 
         for (int j = 0; j < 3; ++j) {
-            boxes[i].min[j] = -1.0 + (n % 3 - 1) * 0.01;
+            boxes[i].corners[j][0] = -1.0 + (n % 3 - 1) * 0.01;
             n /= 3;
 
-            boxes[i].max[j] = +1.0 + (n % 3 - 1) * 0.01;
+            boxes[i].corners[j][1] = +1.0 + (n % 3 - 1) * 0.01;
             n /= 3;
         }
     }
@@ -360,8 +363,8 @@ static void check_ray(const struct ray *ray) {
 #if BASELINE
         bool skip = false;
         for (int j = 0; j < 3; ++j) {
-            float t1 = (boxes[i].min[j] - ray->origin[j]) * ray->dir_inv[j];
-            float t2 = (boxes[i].max[j] - ray->origin[j]) * ray->dir_inv[j];
+            float t1 = (boxes[i].corners[j][0] - ray->origin[j]) * ray->dir_inv[j];
+            float t2 = (boxes[i].corners[j][1] - ray->origin[j]) * ray->dir_inv[j];
             if (isnan(t1) || isnan(t2)) {
                 skip = true;
                 break;
@@ -382,8 +385,9 @@ static void check_ray(const struct ray *ray) {
         if (!(t == vt || (isnan(t) && isnan(vt)))) {
             printf("ray->origin\t= {%f, %f, %f}\n", ray->origin[0], ray->origin[1], ray->origin[2]);
             printf("ray->dir_inv\t= {%f, %f, %f}\n", ray->dir_inv[0], ray->dir_inv[1], ray->dir_inv[2]);
-            printf("boxes[%zu].min\t= {%f, %f, %f}\n", i, boxes[i].min[0], boxes[i].min[1], boxes[i].min[2]);
-            printf("boxex[%zu].max\t= {%f, %f, %f}\n", i, boxes[i].max[0], boxes[i].max[1], boxes[i].max[2]);
+            printf("boxes[%zu].corners[0]\t= {%f, %f}\n", i, boxes[i].corners[0][0], boxes[i].corners[0][1]);
+            printf("boxes[%zu].corners[1]\t= {%f, %f}\n", i, boxes[i].corners[1][0], boxes[i].corners[1][1]);
+            printf("boxes[%zu].corners[2]\t= {%f, %f}\n", i, boxes[i].corners[2][0], boxes[i].corners[2][1]);
             printf("t\t\t= %f\n", t);
             printf("vt\t\t= %f\n", vt);
             abort();
@@ -469,8 +473,11 @@ int main(int argc, char *argv[]) {
 
     struct box *boxes = MALLOC(struct box, nboxes);
     boxes[0] = (struct box) {
-        .min = {-1.0, -1.0, -1.0},
-        .max = {+1.0, +1.0, +1.0},
+        .corners = {
+            {-1.0, +1.0},
+            {-1.0, +1.0},
+            {-1.0, +1.0},
+        },
     };
     octree(boxes, boxes + 1, levels - 1);
     black_box(boxes);

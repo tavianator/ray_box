@@ -21,7 +21,7 @@
 ALL := ray_box_baseline ray_box_exclusive ray_box_inclusive
 
 CC := clang
-CFLAGS := -Wall -O3 -flto -march=native
+CFLAGS := -Wall -g -O3 -flto -march=native
 
 SIMD ?= 0
 
