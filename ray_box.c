@@ -26,6 +26,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdalign.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdnoreturn.h>
@@ -124,8 +125,6 @@ static inline vfloat newt(vfloat tmin, vfloat tmax, vfloat t) {
 #error "Which vector instruction set?"
 #endif
 
-#define VSIZE (sizeof(vfloat) / sizeof(float))
-
 #else // !SIMD
 
 typedef float vfloat;
@@ -150,7 +149,9 @@ static inline vfloat newt(vfloat tmin, vfloat tmax, vfloat t) {
 #endif
 }
 
-#endif
+#endif // !SIMD
+
+#define VSIZE (sizeof(vfloat) / sizeof(float))
 
 struct ray {
     float origin[3];
@@ -263,17 +264,18 @@ static void broadcast_ray(vray *vray, const struct ray *ray) {
 }
 
 #if SIMD
-static vbox *pack_boxes(size_t *nboxes, size_t *nvboxes, struct box boxes[*nboxes]) {
-    *nvboxes = *nboxes / VSIZE;
-    *nboxes = *nvboxes * VSIZE;
+static vbox *pack_boxes(size_t nboxes, size_t *nvboxes, struct box boxes[nboxes]) {
+    *nvboxes = (nboxes + VSIZE - 1) / VSIZE;
     vbox *vboxes = MALLOC(vbox, *nvboxes);
 
     for (size_t i = 0; i < *nvboxes; ++i) {
-        const struct box *unpacked = &boxes[VSIZE * i];
-        for (int j = 0; j < 3; ++j) {
-            for (int k = 0; k < VSIZE; ++k) {
-                vboxes[i].min[j][k] = unpacked[k].min[j];
-                vboxes[i].max[j][k] = unpacked[k].max[j];
+        for (size_t j = 0, k = i * VSIZE; j < VSIZE; ++j, ++k) {
+            if (k == nboxes) {
+                --k;
+            }
+            for (size_t d = 0; d < 3; ++d) {
+                vboxes[i].min[d][j] = boxes[k].min[d];
+                vboxes[i].max[d][j] = boxes[k].max[d];
             }
         }
     }
@@ -281,11 +283,158 @@ static vbox *pack_boxes(size_t *nboxes, size_t *nvboxes, struct box boxes[*nboxe
     return vboxes;
 }
 #else
-static vbox *pack_boxes(size_t *nboxes, size_t *nvboxes, struct box boxes[*nboxes]) {
-    *nvboxes = *nboxes;
+static vbox *pack_boxes(size_t nboxes, size_t *nvboxes, struct box boxes[nboxes]) {
+    *nvboxes = nboxes;
     return boxes;
 }
 #endif
+
+static void reference_impl(
+    const struct ray *ray,
+    size_t nboxes,
+    const struct box boxes[nboxes],
+    float ts[nboxes])
+{
+    for (size_t i = 0; i < nboxes; ++i) {
+        const struct box *box = &boxes[i];
+        float tmin = 0.0;
+        float tmax = ts[i];
+
+        for (int j = 0; j < 3; ++j) {
+            if (isfinite(ray->dir_inv[j])) {
+                float t1 = (box->min[j] - ray->origin[j]) * ray->dir_inv[j];
+                float t2 = (box->max[j] - ray->origin[j]) * ray->dir_inv[j];
+
+                if (t1 < t2) {
+                    tmin = tmin > t1 ? tmin : t1;
+                    tmax = tmax < t2 ? tmax : t2;
+                } else {
+                    tmin = tmin > t2 ? tmin : t2;
+                    tmax = tmax < t1 ? tmax : t1;
+                }
+#if INCLUSIVE
+            } else if (ray->origin[j] < box->min[j] || ray->origin[j] > box->max[j]) {
+#else
+            } else if (ray->origin[j] <= box->min[j] || ray->origin[j] >= box->max[j]) {
+#endif
+                tmin = INFINITY;
+                break;
+            }
+        }
+
+#if INCLUSIVE
+        ts[i] = tmin <= tmax ? tmin : ts[i];
+#else
+        ts[i] = tmin < tmax ? tmin : ts[i];
+#endif
+    }
+}
+
+static void check_ray(const struct ray *ray) {
+    // Check boxes with every corner ± 0.01
+    size_t nboxes = 3 * 3 * 3;
+    nboxes *= nboxes;
+    struct box *boxes = MALLOC(struct box, nboxes);
+
+    for (int i = 0; i < nboxes; ++i) {
+        int n = i;
+
+        for (int j = 0; j < 3; ++j) {
+            boxes[i].min[j] = -1.0 + (n % 3 - 1) * 0.01;
+            n /= 3;
+
+            boxes[i].max[j] = +1.0 + (n % 3 - 1) * 0.01;
+            n /= 3;
+        }
+    }
+
+    float *ts = MALLOC(float, nboxes);
+    for (size_t i = 0; i < nboxes; ++i) {
+        ts[i] = INFINITY;
+    }
+    reference_impl(ray, nboxes, boxes, ts);
+
+    vray vray;
+    broadcast_ray(&vray, ray);
+
+    size_t nvboxes;
+    vbox *vboxes = pack_boxes(nboxes, &nvboxes, boxes);
+
+    vfloat *vts = MALLOC(vfloat, nvboxes);
+    for (size_t i = 0; i < nvboxes; ++i) {
+        vts[i] = broadcast(INFINITY);
+    }
+    intersections(&vray, nvboxes, vboxes, vts);
+
+    for (size_t i = 0; i < nboxes; ++i) {
+#if BASELINE
+        bool skip = false;
+        for (int j = 0; j < 3; ++j) {
+            float t1 = (boxes[i].min[j] - ray->origin[j]) * ray->dir_inv[j];
+            float t2 = (boxes[i].max[j] - ray->origin[j]) * ray->dir_inv[j];
+            if (isnan(t1) || isnan(t2)) {
+                skip = true;
+                break;
+            }
+        }
+        if (skip) {
+            continue;
+        }
+#endif
+
+        float t = ts[i];
+#if SIMD
+        float vt = vts[i / VSIZE][i % VSIZE];
+#else
+        float vt = vts[i];
+#endif
+
+        if (!(t == vt || (isnan(t) && isnan(vt)))) {
+            printf("ray->origin\t= {%f, %f, %f}\n", ray->origin[0], ray->origin[1], ray->origin[2]);
+            printf("ray->dir_inv\t= {%f, %f, %f}\n", ray->dir_inv[0], ray->dir_inv[1], ray->dir_inv[2]);
+            printf("boxes[%zu].min\t= {%f, %f, %f}\n", i, boxes[i].min[0], boxes[i].min[1], boxes[i].min[2]);
+            printf("boxex[%zu].max\t= {%f, %f, %f}\n", i, boxes[i].max[0], boxes[i].max[1], boxes[i].max[2]);
+            printf("t\t\t= %f\n", t);
+            printf("vt\t\t= %f\n", vt);
+            abort();
+        }
+    }
+
+    free(vts);
+#if SIMD
+    free(vboxes);
+#endif
+    free(ts);
+    free(boxes);
+}
+
+static void check() {
+    // Check rays originating at every corner of a box
+    for (int i = 0; i < (1 << 3); ++i) {
+        float origin[3];
+        for (int j = 0; j < 3; ++j) {
+            origin[j] = (i & (1 << j)) ? +1.0 : -1.0;
+        }
+
+        // Check rays aiming at every other corner of the box
+        for (int j = 0; j < (1 << 3); ++j) {
+            if (j == i) {
+                continue;
+            }
+
+            struct ray ray;
+            for (int k = 0; k < 3; ++k) {
+                float c = (j & (1 << k)) ? +1.0 : -1.0;
+                float d = c - origin[k];
+                // Back up the ray so it doesn't start on the box
+                ray.origin[k] = origin[k] - d;
+                ray.dir_inv[k] = 1.0 / d;
+            }
+
+            check_ray(&ray);
+        }
+    }
+}
 
 struct args {
     size_t niters;
@@ -307,7 +456,10 @@ static void *work(void *ptr) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 4) {
+    if (argc == 2 && strcmp(argv[1], "check") == 0) {
+        check();
+        return EXIT_SUCCESS;
+    } else if (argc != 4) {
         fprintf(stderr, "Usage: %s <COUNT> <LEVELS> <THREADS>\n", argv[0]);
         return EXIT_FAILURE;
     }
@@ -337,7 +489,7 @@ int main(int argc, char *argv[]) {
     black_box(boxes);
 
     size_t nvboxes;
-    vbox *vboxes = pack_boxes(&nboxes, &nvboxes, boxes);
+    vbox *vboxes = pack_boxes(nboxes, &nvboxes, boxes);
 
     vfloat *ts = MALLOC(vfloat, nvboxes);
 
@@ -391,7 +543,7 @@ int main(int argc, char *argv[]) {
     double elapsed = end.tv_sec - start.tv_sec;
     elapsed += 1.0e-9 * (end.tv_nsec - start.tv_nsec);
 
-    printf("%f", nthreads * niters * nboxes / elapsed / 1.0e9);
+    printf("%f", nthreads * niters * nvboxes * VSIZE / elapsed / 1.0e9);
 
     return EXIT_SUCCESS;
 }

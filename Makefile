@@ -37,6 +37,13 @@ $(ALL:%=%.o): ray_box_%.o: ray_box.c
 black_box.o: black_box.c
 	$(CC) -c $< -o $@
 
+check: $(ALL:%=check_%)
+.PHONY: check
+
+$(ALL:%=check_%): check_%: %
+	./$< check
+.PHONY: $(ALL:%=check_%)
+
 bench: all
 	./bench.sh
 .PHONY: bench
