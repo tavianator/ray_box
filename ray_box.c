@@ -180,11 +180,11 @@ static void intersections(
 {
     vfloat origin[3];
     vfloat dir_inv[3];
-    size_t sign[3];
+    bool sign[3];
     for (int i = 0; i < 3; ++i) {
         origin[i] = broadcast(ray->origin[i]);
         dir_inv[i] = broadcast(ray->dir_inv[i]);
-        sign[i] = ray->dir_inv[i] < 0.0;
+        sign[i] = signbit(ray->dir_inv[i]) ? 1 : 0;
     }
 
     for (size_t i = 0; i < nboxes; ++i) {
@@ -194,7 +194,7 @@ static void intersections(
 
         for (int j = 0; j < 3; ++j) {
             vfloat bmin = box->corners[j][sign[j]];
-            vfloat bmax = box->corners[j][1 ^ sign[j]];
+            vfloat bmax = box->corners[j][!sign[j]];
 
             vfloat jmin = (bmin - origin[j]) * dir_inv[j];
             vfloat jmax = (bmax - origin[j]) * dir_inv[j];
