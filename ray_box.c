@@ -60,8 +60,8 @@ static inline vfloat newt(vfloat tmin, vfloat tmax, vfloat t) {
 #else
 #define CMP _CMP_LT_OQ
 #endif
-        vfloat mask = _mm256_cmp_ps(tmin, tmax, CMP);
-        return _mm256_blendv_ps(t, tmin, mask);
+    vfloat mask = _mm256_cmp_ps(tmin, tmax, CMP);
+    return _mm256_blendv_ps(t, tmin, mask);
 }
 
 #elif __SSE__
@@ -85,17 +85,17 @@ static inline vfloat max(vfloat x, vfloat y) {
 
 static inline vfloat newt(vfloat tmin, vfloat tmax, vfloat t) {
 #if INCLUSIVE
-        vfloat mask = _mm_cmple_ps(tmin, tmax);
+    vfloat mask = _mm_cmple_ps(tmin, tmax);
 #else
-        vfloat mask = _mm_cmplt_ps(tmin, tmax);
+    vfloat mask = _mm_cmplt_ps(tmin, tmax);
 #endif
 
 #if __SSE4_1__
-        return _mm_blendv_ps(t, tmin, mask);
+    return _mm_blendv_ps(t, tmin, mask);
 #else
-        tmin = _mm_and_ps(mask, tmin);
-        t = _mm_andnot_ps(mask, t);
-        return _mm_or_ps(tmin, t);
+    tmin = _mm_and_ps(mask, tmin);
+    t = _mm_andnot_ps(mask, t);
+    return _mm_or_ps(tmin, t);
 #endif
 }
 
@@ -181,10 +181,10 @@ static void intersections(
     vfloat origin[3];
     vfloat dir_inv[3];
     bool sign[3];
-    for (int i = 0; i < 3; ++i) {
-        origin[i] = broadcast(ray->origin[i]);
-        dir_inv[i] = broadcast(ray->dir_inv[i]);
-        sign[i] = signbit(ray->dir_inv[i]) ? 1 : 0;
+    for (int d = 0; d < 3; ++d) {
+        origin[d] = broadcast(ray->origin[d]);
+        dir_inv[d] = broadcast(ray->dir_inv[d]);
+        sign[d] = signbit(ray->dir_inv[d]) ? 1 : 0;
     }
 
     for (size_t i = 0; i < nboxes; ++i) {
@@ -192,19 +192,19 @@ static void intersections(
         vfloat tmin = broadcast(0.0);
         vfloat tmax = ts[i];
 
-        for (int j = 0; j < 3; ++j) {
-            vfloat bmin = box->corners[j][sign[j]];
-            vfloat bmax = box->corners[j][!sign[j]];
+        for (int d = 0; d < 3; ++d) {
+            vfloat bmin = box->corners[d][sign[d]];
+            vfloat bmax = box->corners[d][!sign[d]];
 
-            vfloat jmin = (bmin - origin[j]) * dir_inv[j];
-            vfloat jmax = (bmax - origin[j]) * dir_inv[j];
+            vfloat dmin = (bmin - origin[d]) * dir_inv[d];
+            vfloat dmax = (bmax - origin[d]) * dir_inv[d];
 
 #if EXCLUSIVE
-            tmin = max(tmin, min(jmin, tmax));
-            tmax = min(tmax, max(jmax, tmin));
+            tmin = max(tmin, min(dmin, tmax));
+            tmax = min(tmax, max(dmax, tmin));
 #elif INCLUSIVE
-            tmin = max(jmin, tmin);
-            tmax = min(jmax, tmax);
+            tmin = max(dmin, tmin);
+            tmax = min(dmax, tmax);
 #else
 #error "Which implementation?"
 #endif
@@ -234,15 +234,15 @@ static struct box *octree(const struct box *parent, struct box *children, int le
     struct box *child = children;
 
     if (level > 0) {
-        for (int i = 0; i < 8; ++i) {
-            for (int j = 0; j < 3; ++j) {
-                float mid = (parent->corners[j][1] + parent->corners[j][0]) / 2.0;
-                if ((i >> j) & 1) {
-                    child->corners[j][0] = mid;
-                    child->corners[j][1] = parent->corners[j][1];
+        for (int i = 0; i < (1 << 3); ++i) {
+            for (int d = 0; d < 3; ++d) {
+                float mid = (parent->corners[d][0] + parent->corners[d][1]) / 2.0;
+                if (i & (1 << d)) {
+                    child->corners[d][0] = mid;
+                    child->corners[d][1] = parent->corners[d][1];
                 } else {
-                    child->corners[j][0] = parent->corners[j][0];
-                    child->corners[j][1] = mid;
+                    child->corners[d][0] = parent->corners[d][0];
+                    child->corners[d][1] = mid;
                 }
             }
             ++child;
@@ -266,7 +266,7 @@ static vbox *pack_boxes(size_t nboxes, size_t *nvboxes, struct box boxes[nboxes]
             if (k == nboxes) {
                 --k;
             }
-            for (size_t d = 0; d < 3; ++d) {
+            for (int d = 0; d < 3; ++d) {
                 vboxes[i].corners[d][0][j] = boxes[k].corners[d][0];
                 vboxes[i].corners[d][1][j] = boxes[k].corners[d][1];
             }
@@ -293,10 +293,10 @@ static void reference_impl(
         float tmin = 0.0;
         float tmax = ts[i];
 
-        for (int j = 0; j < 3; ++j) {
-            if (isfinite(ray->dir_inv[j])) {
-                float t1 = (box->corners[j][0] - ray->origin[j]) * ray->dir_inv[j];
-                float t2 = (box->corners[j][1] - ray->origin[j]) * ray->dir_inv[j];
+        for (int d = 0; d < 3; ++d) {
+            if (isfinite(ray->dir_inv[d])) {
+                float t1 = (box->corners[d][0] - ray->origin[d]) * ray->dir_inv[d];
+                float t2 = (box->corners[d][1] - ray->origin[d]) * ray->dir_inv[d];
 
                 if (t1 < t2) {
                     tmin = tmin > t1 ? tmin : t1;
@@ -306,9 +306,9 @@ static void reference_impl(
                     tmax = tmax < t1 ? tmax : t1;
                 }
 #if INCLUSIVE
-            } else if (ray->origin[j] < box->corners[j][0] || ray->origin[j] > box->corners[j][1]) {
+            } else if (ray->origin[d] < box->corners[d][0] || ray->origin[d] > box->corners[d][1]) {
 #else
-            } else if (ray->origin[j] <= box->corners[j][0] || ray->origin[j] >= box->corners[j][1]) {
+            } else if (ray->origin[d] <= box->corners[d][0] || ray->origin[d] >= box->corners[d][1]) {
 #endif
                 tmin = INFINITY;
                 break;
@@ -332,11 +332,11 @@ static void check_ray(const struct ray *ray) {
     for (int i = 0; i < nboxes; ++i) {
         int n = i;
 
-        for (int j = 0; j < 3; ++j) {
-            boxes[i].corners[j][0] = -1.0 + (n % 3 - 1) * 0.01;
+        for (int d = 0; d < 3; ++d) {
+            boxes[i].corners[d][0] = -1.0 + (n % 3 - 1) * 0.01;
             n /= 3;
 
-            boxes[i].corners[j][1] = +1.0 + (n % 3 - 1) * 0.01;
+            boxes[i].corners[d][1] = +1.0 + (n % 3 - 1) * 0.01;
             n /= 3;
         }
     }
@@ -388,8 +388,8 @@ static void check() {
     // Check rays originating at every corner of a box
     for (int i = 0; i < (1 << 3); ++i) {
         float origin[3];
-        for (int j = 0; j < 3; ++j) {
-            origin[j] = (i & (1 << j)) ? +1.0 : -1.0;
+        for (int d = 0; d < 3; ++d) {
+            origin[d] = (i & (1 << d)) ? +1.0 : -1.0;
         }
 
         // Check rays aiming at every other corner of the box
@@ -399,12 +399,12 @@ static void check() {
             }
 
             struct ray ray;
-            for (int k = 0; k < 3; ++k) {
-                float c = (j & (1 << k)) ? +1.0 : -1.0;
-                float d = c - origin[k];
+            for (int d = 0; d < 3; ++d) {
+                float target = (j & (1 << d)) ? +1.0 : -1.0;
+                float delta = target - origin[d];
                 // Back up the ray so it doesn't start on the box
-                ray.origin[k] = origin[k] - d;
-                ray.dir_inv[k] = 1.0 / d;
+                ray.origin[d] = origin[d] - delta;
+                ray.dir_inv[d] = 1.0 / delta;
             }
 
             check_ray(&ray);
