@@ -27,6 +27,7 @@
 #include <pthread.h>
 #include <stdalign.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdnoreturn.h>
@@ -159,12 +160,14 @@ struct ray {
 };
 
 struct box {
-    float corners[3][2];
+    float min[3];
+    float max[3];
 };
 
 #if SIMD
 struct vbox {
-    vfloat corners[3][2];
+    vfloat min[3];
+    vfloat max[3];
 };
 
 typedef struct vbox vbox;
@@ -172,19 +175,21 @@ typedef struct vbox vbox;
 typedef struct box vbox;
 #endif
 
+#define OFFSET(ptr, off) (void *)((char *)(ptr) + (off))
+
 static void intersections(
     const struct ray *ray,
     size_t nboxes,
     const vbox boxes[nboxes],
     vfloat ts[nboxes])
 {
-    vfloat origin[3];
-    vfloat dir_inv[3];
-    bool sign[3];
+    vfloat origin[3], dir_inv[3];
+    size_t omin[3], omax[3];
     for (int d = 0; d < 3; ++d) {
         origin[d] = broadcast(ray->origin[d]);
         dir_inv[d] = broadcast(ray->dir_inv[d]);
-        sign[d] = signbit(ray->dir_inv[d]) ? 1 : 0;
+        omin[d] = signbit(ray->dir_inv[d]) ? offsetof(vbox, max) : offsetof(vbox, min);
+        omax[d] = signbit(ray->dir_inv[d]) ? offsetof(vbox, min) : offsetof(vbox, max);
     }
 
     for (size_t i = 0; i < nboxes; ++i) {
@@ -193,11 +198,11 @@ static void intersections(
         vfloat tmax = ts[i];
 
         for (int d = 0; d < 3; ++d) {
-            vfloat bmin = box->corners[d][sign[d]];
-            vfloat bmax = box->corners[d][!sign[d]];
+            const vfloat *bmin = OFFSET(box, omin[d]);
+            const vfloat *bmax = OFFSET(box, omax[d]);
 
-            vfloat dmin = (bmin - origin[d]) * dir_inv[d];
-            vfloat dmax = (bmax - origin[d]) * dir_inv[d];
+            vfloat dmin = (bmin[d] - origin[d]) * dir_inv[d];
+            vfloat dmax = (bmax[d] - origin[d]) * dir_inv[d];
 
 #if EXCLUSIVE
             tmin = max(tmin, min(dmin, tmax));
@@ -228,7 +233,7 @@ static void *xmemalign(size_t align, size_t size) {
     return ptr;
 }
 
-#define MALLOC(type, count) xmemalign(alignof(type), count * sizeof(type))
+#define MALLOC(type, count) xmemalign(alignof(type), (count) * sizeof(type))
 
 static struct box *octree(const struct box *parent, struct box *children, int level) {
     struct box *child = children;
@@ -236,13 +241,13 @@ static struct box *octree(const struct box *parent, struct box *children, int le
     if (level > 0) {
         for (int i = 0; i < (1 << 3); ++i) {
             for (int d = 0; d < 3; ++d) {
-                float mid = (parent->corners[d][0] + parent->corners[d][1]) / 2.0;
+                float mid = (parent->min[d] + parent->max[d]) / 2.0;
                 if (i & (1 << d)) {
-                    child->corners[d][0] = mid;
-                    child->corners[d][1] = parent->corners[d][1];
+                    child->min[d] = mid;
+                    child->max[d] = parent->max[d];
                 } else {
-                    child->corners[d][0] = parent->corners[d][0];
-                    child->corners[d][1] = mid;
+                    child->min[d] = parent->min[d];
+                    child->max[d] = mid;
                 }
             }
             ++child;
@@ -267,8 +272,8 @@ static vbox *pack_boxes(size_t nboxes, size_t *nvboxes, struct box boxes[nboxes]
                 --k;
             }
             for (int d = 0; d < 3; ++d) {
-                vboxes[i].corners[d][0][j] = boxes[k].corners[d][0];
-                vboxes[i].corners[d][1][j] = boxes[k].corners[d][1];
+                vboxes[i].min[d][j] = boxes[k].min[d];
+                vboxes[i].max[d][j] = boxes[k].max[d];
             }
         }
     }
@@ -295,8 +300,8 @@ static void reference_impl(
 
         for (int d = 0; d < 3; ++d) {
             if (isfinite(ray->dir_inv[d])) {
-                float t1 = (box->corners[d][0] - ray->origin[d]) * ray->dir_inv[d];
-                float t2 = (box->corners[d][1] - ray->origin[d]) * ray->dir_inv[d];
+                float t1 = (box->min[d] - ray->origin[d]) * ray->dir_inv[d];
+                float t2 = (box->max[d] - ray->origin[d]) * ray->dir_inv[d];
 
                 if (t1 < t2) {
                     tmin = tmin > t1 ? tmin : t1;
@@ -306,9 +311,9 @@ static void reference_impl(
                     tmax = tmax < t1 ? tmax : t1;
                 }
 #if INCLUSIVE
-            } else if (ray->origin[d] < box->corners[d][0] || ray->origin[d] > box->corners[d][1]) {
+            } else if (ray->origin[d] < box->min[d] || ray->origin[d] > box->max[d]) {
 #else
-            } else if (ray->origin[d] <= box->corners[d][0] || ray->origin[d] >= box->corners[d][1]) {
+            } else if (ray->origin[d] <= box->min[d] || ray->origin[d] >= box->max[d]) {
 #endif
                 tmin = INFINITY;
                 break;
@@ -333,10 +338,10 @@ static void check_ray(const struct ray *ray) {
         int n = i;
 
         for (int d = 0; d < 3; ++d) {
-            boxes[i].corners[d][0] = -1.0 + (n % 3 - 1) * 0.01;
+            boxes[i].min[d] = -1.0 + (n % 3 - 1) * 0.01;
             n /= 3;
 
-            boxes[i].corners[d][1] = +1.0 + (n % 3 - 1) * 0.01;
+            boxes[i].max[d] = +1.0 + (n % 3 - 1) * 0.01;
             n /= 3;
         }
     }
@@ -367,9 +372,8 @@ static void check_ray(const struct ray *ray) {
         if (!(t == vt || (isnan(t) && isnan(vt)))) {
             printf("ray->origin\t= {%f, %f, %f}\n", ray->origin[0], ray->origin[1], ray->origin[2]);
             printf("ray->dir_inv\t= {%f, %f, %f}\n", ray->dir_inv[0], ray->dir_inv[1], ray->dir_inv[2]);
-            printf("boxes[%zu].corners[0]\t= {%f, %f}\n", i, boxes[i].corners[0][0], boxes[i].corners[0][1]);
-            printf("boxes[%zu].corners[1]\t= {%f, %f}\n", i, boxes[i].corners[1][0], boxes[i].corners[1][1]);
-            printf("boxes[%zu].corners[2]\t= {%f, %f}\n", i, boxes[i].corners[2][0], boxes[i].corners[2][1]);
+            printf("boxes[%zu].min\t= {%f, %f, %f}\n", i, boxes[i].min[0], boxes[i].min[1], boxes[i].min[2]);
+            printf("boxex[%zu].max\t= {%f, %f, %f}\n", i, boxes[i].max[0], boxes[i].max[1], boxes[i].max[2]);
             printf("t\t\t= %f\n", t);
             printf("vt\t\t= %f\n", vt);
             abort();
@@ -455,11 +459,8 @@ int main(int argc, char *argv[]) {
 
     struct box *boxes = MALLOC(struct box, nboxes);
     boxes[0] = (struct box) {
-        .corners = {
-            {-1.0, +1.0},
-            {-1.0, +1.0},
-            {-1.0, +1.0},
-        },
+        .min = {-1.0, -1.0, -1.0},
+        .max = {+1.0, +1.0, +1.0},
     };
     octree(boxes, boxes + 1, levels - 1);
     black_box(boxes);
