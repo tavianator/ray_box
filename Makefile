@@ -18,33 +18,30 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-ALL := ray_box_exclusive ray_box_inclusive
+IMPLS := baseline exclusive inclusive signs
 
-SIMD ?= 0
+SISD := $(IMPLS:%=ray_box_%)
+SIMD := $(IMPLS:%=ray_vbox_%)
+ALL := $(SISD) $(SIMD)
 
 CC := clang
-CFLAGS := -Wall -g -O3 -flto -march=native -DSIMD=$(SIMD)
+CFLAGS := -Wall -g -O3 -flto -march=native
 
 all: $(ALL)
-.PHONY: all
+sisd: $(SISD)
+simd: $(SIMD)
+.PHONY: all sisd simd
 
-$(ALL): ray_box_%: black_box.o ray_box_%.o
+$(ALL): %: %.o black_box.o
 	+$(CC) $(CFLAGS) $^ -o $@
 
-$(ALL:%=%.o): ray_box_%.o: ray_box.c .flags
-	$(CC) $(CFLAGS) -D$(shell impl=$*; echo $${impl^^}) -c $< -o $@
+$(SISD:%=%.o): ray_box_%.o: ray_box.c
+	$(CC) $(CFLAGS) -DSIMD=0 -D$(shell impl=$*; echo $${impl^^}) -c $< -o $@
+$(SIMD:%=%.o): ray_vbox_%.o: ray_box.c
+	$(CC) $(CFLAGS) -DSIMD=1 -D$(shell impl=$*; echo $${impl^^}) -c $< -o $@
 
 black_box.o: black_box.c .flags
 	$(CC) -c $< -o $@
-
-# Save the compiler flags to rebuild everything when they change
-.newflags:
-	@echo $(CC) $(CFLAGS) >$@
-.PHONY: .newflags
-
-# Only update .flags if .newflags is different
-.flags: .newflags
-	@test -e $@ && cmp -s $@ $< && rm $< || mv $< $@
 
 check: $(ALL:%=check_%)
 .PHONY: check
@@ -54,9 +51,9 @@ $(ALL:%=check_%): check_%: %
 .PHONY: $(ALL:%=check_%)
 
 bench: all
-	./bench.sh
+	tailfin ./bench.sh
 .PHONY: bench
 
 clean:
-	$(RM) *.o
+	$(RM) $(ALL) *.o
 .PHONY: clean

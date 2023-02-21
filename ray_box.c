@@ -20,6 +20,10 @@
  * SOFTWARE.
  */
 
+#if __linux__
+#define _GNU_SOURCE
+#endif
+
 #include "black_box.h"
 #include <errno.h>
 #include <float.h>
@@ -56,7 +60,7 @@ static inline vfloat max(vfloat x, vfloat y) {
 }
 
 static inline vfloat newt(vfloat tmin, vfloat tmax, vfloat t) {
-#if INCLUSIVE
+#if INCLUSIVE || SIGNS
 #define CMP _CMP_LE_OQ
 #else
 #define CMP _CMP_LT_OQ
@@ -85,7 +89,7 @@ static inline vfloat max(vfloat x, vfloat y) {
 }
 
 static inline vfloat newt(vfloat tmin, vfloat tmax, vfloat t) {
-#if INCLUSIVE
+#if INCLUSIVE || SIGNS
     vfloat mask = _mm_cmple_ps(tmin, tmax);
 #else
     vfloat mask = _mm_cmplt_ps(tmin, tmax);
@@ -143,7 +147,7 @@ static inline vfloat max(vfloat x, vfloat y) {
 }
 
 static inline vfloat newt(vfloat tmin, vfloat tmax, vfloat t) {
-#if INCLUSIVE
+#if INCLUSIVE || SIGNS
     return tmin <= tmax ? tmin : t;
 #else
     return tmin < tmax ? tmin : t;
@@ -160,22 +164,30 @@ struct ray {
 };
 
 struct box {
-    float min[3];
-    float max[3];
+    union {
+        float corners[2][3];
+        struct {
+            float min[3];
+            float max[3];
+        };
+    };
 };
 
 #if SIMD
 struct vbox {
-    vfloat min[3];
-    vfloat max[3];
+    union {
+        vfloat corners[2][3];
+        struct {
+            vfloat min[3];
+            vfloat max[3];
+        };
+    };
 };
 
 typedef struct vbox vbox;
 #else
 typedef struct box vbox;
 #endif
-
-#define OFFSET(ptr, off) (void *)((char *)(ptr) + (off))
 
 static void intersections(
     const struct ray *ray,
@@ -184,13 +196,17 @@ static void intersections(
     vfloat ts[nboxes])
 {
     vfloat origin[3], dir_inv[3];
-    size_t omin[3], omax[3];
     for (int d = 0; d < 3; ++d) {
         origin[d] = broadcast(ray->origin[d]);
         dir_inv[d] = broadcast(ray->dir_inv[d]);
-        omin[d] = signbit(ray->dir_inv[d]) ? offsetof(vbox, max) : offsetof(vbox, min);
-        omax[d] = signbit(ray->dir_inv[d]) ? offsetof(vbox, min) : offsetof(vbox, max);
     }
+
+#if SIGNS
+    bool signs[3];
+    for (int d = 0; d < 3; ++d) {
+        signs[d] = signbit(ray->dir_inv[d]);
+    }
+#endif
 
     for (size_t i = 0; i < nboxes; ++i) {
         const vbox *box = &boxes[i];
@@ -198,18 +214,29 @@ static void intersections(
         vfloat tmax = ts[i];
 
         for (int d = 0; d < 3; ++d) {
-            const vfloat *bmin = OFFSET(box, omin[d]);
-            const vfloat *bmax = OFFSET(box, omax[d]);
+#if SIGNS
+            vfloat bmin = box->corners[signs[d]][d];
+            vfloat bmax = box->corners[!signs[d]][d];
+#else
+            vfloat bmin = box->min[d];
+            vfloat bmax = box->max[d];
+#endif
 
-            vfloat dmin = (bmin[d] - origin[d]) * dir_inv[d];
-            vfloat dmax = (bmax[d] - origin[d]) * dir_inv[d];
+            vfloat t1 = (bmin - origin[d]) * dir_inv[d];
+            vfloat t2 = (bmax - origin[d]) * dir_inv[d];
 
-#if EXCLUSIVE
-            tmin = max(tmin, min(dmin, tmax));
-            tmax = min(tmax, max(dmax, tmin));
+#if BASELINE
+            tmin = max(tmin, min(t1, t2));
+            tmax = min(tmax, max(t1, t2));
+#elif EXCLUSIVE
+            tmin = max(tmin, min(min(t1, t2), tmax));
+            tmax = min(tmax, max(max(t1, t2), tmin));
 #elif INCLUSIVE
-            tmin = max(dmin, tmin);
-            tmax = min(dmax, tmax);
+            tmin = min(max(t1, tmin), max(t2, tmin));
+            tmax = max(min(t1, tmax), min(t2, tmax));
+#elif SIGNS
+            tmin = max(t1, tmin);
+            tmax = min(t2, tmax);
 #else
 #error "Which implementation?"
 #endif
@@ -280,10 +307,17 @@ static vbox *pack_boxes(size_t nboxes, size_t *nvboxes, struct box boxes[nboxes]
 
     return vboxes;
 }
+
+static void free_vboxes(vbox *vboxes) {
+    free(vboxes);
+}
 #else
 static vbox *pack_boxes(size_t nboxes, size_t *nvboxes, struct box boxes[nboxes]) {
     *nvboxes = nboxes;
     return boxes;
+}
+
+static void free_vboxes(vbox *vboxes) {
 }
 #endif
 
@@ -310,7 +344,7 @@ static void reference_impl(
                     tmin = tmin > t2 ? tmin : t2;
                     tmax = tmax < t1 ? tmax : t1;
                 }
-#if INCLUSIVE
+#if INCLUSIVE || SIGNS
             } else if (ray->origin[d] < box->min[d] || ray->origin[d] > box->max[d]) {
 #else
             } else if (ray->origin[d] <= box->min[d] || ray->origin[d] >= box->max[d]) {
@@ -320,7 +354,7 @@ static void reference_impl(
             }
         }
 
-#if INCLUSIVE
+#if INCLUSIVE || SIGNS
         ts[i] = tmin <= tmax ? tmin : ts[i];
 #else
         ts[i] = tmin < tmax ? tmin : ts[i];
@@ -362,6 +396,21 @@ static void check_ray(const struct ray *ray) {
     intersections(ray, nvboxes, vboxes, vts);
 
     for (size_t i = 0; i < nboxes; ++i) {
+#if BASELINE
+        bool skip = false;
+        for (int d = 0; d < 3; ++d) {
+            float t1 = (boxes[i].min[d] - ray->origin[d]) * ray->dir_inv[d];
+            float t2 = (boxes[i].max[d] - ray->origin[d]) * ray->dir_inv[d];
+            if (isnan(t1) || isnan(t2)) {
+                skip = true;
+                break;
+            }
+        }
+        if (skip) {
+            continue;
+        }
+#endif
+
         float t = ts[i];
 #if SIMD
         float vt = vts[i / VSIZE][i % VSIZE];
@@ -381,9 +430,7 @@ static void check_ray(const struct ray *ray) {
     }
 
     free(vts);
-#if SIMD
-    free(vboxes);
-#endif
+    free_vboxes(vboxes);
     free(ts);
     free(boxes);
 }
@@ -416,24 +463,71 @@ static void check() {
     }
 }
 
+static void barrier(pthread_barrier_t *barrier, struct timespec *ts) {
+    int ret = pthread_barrier_wait(barrier);
+    if (ret == PTHREAD_BARRIER_SERIAL_THREAD) {
+        if (clock_gettime(CLOCK_MONOTONIC, ts) != 0) {
+            die("clock_gettime()", errno);
+        }
+    } else if (ret != 0) {
+        die("pthread_barrier_wait()", ret);
+    }
+}
+
 struct args {
+    pthread_barrier_t *barrier;
+    struct timespec *start;
+    struct timespec *end;
     size_t niters;
     const struct ray *ray;
     size_t nboxes;
     const vbox *boxes;
-    vfloat *ts;
 };
 
 static void *work(void *ptr) {
     struct args *args = ptr;
 
-    for (int i = 0; i < args->niters; ++i) {
-        intersections(args->ray, args->nboxes, args->boxes, args->ts);
-        black_box(args->ts);
+    size_t nboxes = args->nboxes;
+    size_t chunk = (64 << 10) / sizeof(vfloat);
+    chunk = nboxes < chunk ? nboxes : chunk;
+
+    vfloat *ts = MALLOC(vfloat, chunk);
+    for (size_t i = 0; i < chunk; ++i) {
+        ts[i] = broadcast(INFINITY);
+    }
+    black_box(ts);
+
+    barrier(args->barrier, args->start);
+
+    for (size_t i = 0; i < args->niters; ++i) {
+        size_t j;
+        for (j = 0; j + chunk < nboxes; j += chunk) {
+            intersections(args->ray, chunk, args->boxes + j, ts);
+            black_box(ts);
+        }
+        intersections(args->ray, nboxes - j, args->boxes + j, ts);
+        black_box(ts);
     }
 
+    barrier(args->barrier, args->end);
+
+    free(ts);
     return NULL;
 }
+
+#if __linux__
+static size_t cpu_next(size_t cpu, cpu_set_t *cpus) {
+    while (!CPU_ISSET(cpu, cpus)) {
+        ++cpu;
+    }
+    return cpu;
+}
+
+static void cpu_one_hot(size_t cpu, cpu_set_t *cpus) {
+    CPU_ZERO(cpus);
+    CPU_SET(cpu, cpus);
+}
+#endif
 
 int main(int argc, char *argv[]) {
     if (argc == 2 && strcmp(argv[1], "check") == 0) {
@@ -447,6 +541,11 @@ int main(int argc, char *argv[]) {
     size_t count = strtoull(argv[1], NULL, 0);
     size_t levels = strtoull(argv[2], NULL, 0);
     size_t nthreads = strtoull(argv[3], NULL, 0);
+    if (nthreads < 1) {
+        fprintf(stderr, "Not enough threads\n");
+        return EXIT_FAILURE;
+    }
+
     size_t nboxes = (1ULL << (3 * levels)) / 7;
     size_t niters = count / nboxes;
     niters = niters > 0 ? niters : 1;
@@ -459,8 +558,10 @@ int main(int argc, char *argv[]) {
 
     struct box *boxes = MALLOC(struct box, nboxes);
     boxes[0] = (struct box) {
-        .min = {-1.0, -1.0, -1.0},
-        .max = {+1.0, +1.0, +1.0},
+        .corners = {
+            {-1.0, -1.0, -1.0},
+            {+1.0, +1.0, +1.0},
+        },
     };
     octree(boxes, boxes + 1, levels - 1);
     black_box(boxes);
@@ -468,53 +569,84 @@ int main(int argc, char *argv[]) {
     size_t nvboxes;
     vbox *vboxes = pack_boxes(nboxes, &nvboxes, boxes);
 
-    vfloat *ts = MALLOC(vfloat, nvboxes);
-
-    for (size_t i = 0; i < nvboxes; ++i) {
-        ts[i] = broadcast(INFINITY);
-    }
-    black_box(ts);
-
-    intersections(&ray, nvboxes, vboxes, ts);
-    black_box(ts);
-
-    struct args *args = MALLOC(struct args, nthreads);
-    for (size_t i = 0; i < nthreads; ++i) {
-        vfloat *copy = MALLOC(vfloat, nvboxes);
-        memcpy(copy, ts, nvboxes * sizeof(vfloat));
-
-        args[i] = (struct args) {
-            .niters = niters,
-            .ray = &ray,
-            .nboxes = nvboxes,
-            .boxes = vboxes,
-            .ts = copy,
-        };
+    pthread_barrier_t barrier;
+    int err = pthread_barrier_init(&barrier, NULL, nthreads);
+    if (err != 0) {
+        die("pthread_barrier_init()", err);
     }
 
-    struct timespec start;
-    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
-        die("clock_gettime()", errno);
+    struct timespec start, end;
+
+    struct args args = {
+        .barrier = &barrier,
+        .start = &start,
+        .end = &end,
+        .niters = niters,
+        .ray = &ray,
+        .nboxes = nvboxes,
+        .boxes = vboxes,
+    };
+
+#if __linux__
+    cpu_set_t cpus;
+    err = pthread_getaffinity_np(pthread_self(), sizeof(cpus), &cpus);
+    if (err != 0) {
+        die("pthread_getaffinity_np()", err);
+    }
+    size_t ncpus = CPU_COUNT(&cpus);
+    size_t cpu = cpu_next(0, &cpus);
+
+    // If the number of available CPUs and threads are the same, pin each
+    // thread to a separate CPU
+    if (nthreads == ncpus) {
+        cpu_set_t affinity;
+        cpu_one_hot(cpu, &affinity);
+        err = pthread_setaffinity_np(pthread_self(), sizeof(affinity), &affinity);
+        if (err != 0) {
+            die("pthread_setaffinity_np()", err);
+        }
+    }
+#endif
+
+    pthread_attr_t attrs;
+    err = pthread_attr_init(&attrs);
+    if (err != 0) {
+        die("pthread_attr_init()", err);
     }
 
-    pthread_t *threads = MALLOC(pthread_t, nthreads);
-    for (size_t i = 0; i < nthreads; ++i) {
-        int ret = pthread_create(&threads[i], NULL, work, &args[i]);
-        if (ret != 0) {
-            die("pthread_create()", ret);
+    pthread_t *threads = MALLOC(pthread_t, nthreads - 1);
+    for (size_t i = 0; i < nthreads - 1; ++i) {
+#if __linux__
+        if (nthreads == ncpus) {
+            cpu = cpu_next(cpu + 1, &cpus);
+
+            cpu_set_t affinity;
+            cpu_one_hot(cpu, &affinity);
+            err = pthread_attr_setaffinity_np(&attrs, sizeof(affinity), &affinity);
+            if (err != 0) {
+                die("pthread_attr_setaffinity_np()", err);
+            }
+        }
+#endif
+
+        err = pthread_create(&threads[i], &attrs, work, &args);
+        if (err != 0) {
+            die("pthread_create()", err);
         }
     }
 
-    for (size_t i = 0; i < nthreads; ++i) {
-        int ret = pthread_join(threads[i], NULL);
-        if (ret != 0) {
-            die("pthread_join()", ret);
-        }
+    err = pthread_attr_destroy(&attrs);
+    if (err != 0) {
+        die("pthread_attr_destroy()", err);
     }
 
-    struct timespec end;
-    if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) {
-        die("clock_gettime()", errno);
+    work(&args);
+
+    for (size_t i = 0; i < nthreads - 1; ++i) {
+        err = pthread_join(threads[i], NULL);
+        if (err != 0) {
+            die("pthread_join()", err);
+        }
     }
 
     double elapsed = end.tv_sec - start.tv_sec;
@@ -522,5 +654,8 @@ int main(int argc, char *argv[]) {
 
     printf("%f", nthreads * niters * nvboxes * VSIZE / elapsed / 1.0e9);
 
+    free(threads);
+    free_vboxes(vboxes);
+    free(boxes);
     return EXIT_SUCCESS;
 }

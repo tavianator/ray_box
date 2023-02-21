@@ -1,3 +1,5 @@
 .flags
 *.o
 ray_box_*
+ray_vbox_*
+results/
